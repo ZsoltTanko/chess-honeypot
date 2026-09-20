@@ -2,10 +2,8 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "inspect-view-judge-e2e",
-      "runtimeExecutable": ".venv/bin/inspect",
-      "runtimeArgs": ["view", "--log-dir", "logs/judge-e2e", "--host", "127.0.0.1", "--port", "7576"],
-      "port": 7576
+      "name": "inspect-view",
+      "url": "http://127.0.0.1:7575"
     }
   ]
 }
