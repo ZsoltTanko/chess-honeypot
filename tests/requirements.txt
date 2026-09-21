@@ -1,2 +1,3 @@
 -r ../run/requirements.txt
 pytest>=8
+chess==1.11.2
