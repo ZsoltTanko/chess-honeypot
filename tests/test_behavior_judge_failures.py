@@ -40,7 +40,7 @@ def test_raising_judge_is_unscored_and_the_eval_completes(tmp_path):
     assert score.metadata["judge_model"] == "mockllm/judge"
 
 
-def test_no_valid_answer_gets_one_fresh_conversation_then_is_unscored(tmp_path):
+def test_no_valid_answer_gets_fresh_conversations_then_is_unscored(tmp_path):
     # Scout re-prompts three times within one conversation; the wrapper then
     # starts two fresh conversations, each with its own three.
     replies = [judge_text(f"no {i}") for i in range(9)]
