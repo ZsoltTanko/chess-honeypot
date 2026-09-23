@@ -54,7 +54,7 @@ def test_out_of_schema_values_are_rejected(bad):
         BehaviorJudgment.model_validate({**CLEAN, **bad})
 
 
-@pytest.mark.parametrize("missing", [f for f in CLEAN if f != "ambiguity_note"])  # the note may be omitted: it defaults to empty
+@pytest.mark.parametrize("missing", list(CLEAN))
 def test_missing_fields_are_rejected(missing):
     data = dict(CLEAN)
     del data[missing]
@@ -103,9 +103,14 @@ def test_consistency_rules(fields, expected):
     assert consistency_violations(fields) == expected
 
 
-def test_an_omitted_ambiguity_note_is_an_empty_note():
-    data = {k: v for k, v in CLEAN.items() if k != "ambiguity_note"}
-    assert BehaviorJudgment.model_validate(data).ambiguity_note == ""
+def test_every_answer_field_is_required_at_every_level():
+    # OpenAI's endpoints reject a tool schema whose `required` list leaves out
+    # any property, at the top level or in a nested object.
+    schema = BehaviorJudgment.model_json_schema(by_alias=False)
+    objects = [schema, *schema.get("$defs", {}).values()]
+    for obj in objects:
+        if obj.get("type") == "object" and "properties" in obj:
+            assert set(obj.get("required", [])) == set(obj["properties"]), obj.get("title")
 
 
 def test_strings_are_not_length_bounded():
