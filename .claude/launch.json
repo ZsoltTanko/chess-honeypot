@@ -4,6 +4,15 @@
     {
       "name": "inspect-view",
       "url": "http://127.0.0.1:7575"
+    },
+    {
+      "name": "inspect-view-data",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "exec .venv/bin/inspect view --log-dir \"$(cd ../../data && pwd)\" --port 7576"
+      ],
+      "port": 7576
     }
   ]
 }
