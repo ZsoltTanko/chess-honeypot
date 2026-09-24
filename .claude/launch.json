@@ -13,6 +13,20 @@
         "exec .venv/bin/inspect view --log-dir \"$(cd ../../data && pwd)\" --port 7576"
       ],
       "port": 7576
+    },
+    {
+      "name": "scorecards",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "7577",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "../../docs/research/experiments"
+      ],
+      "port": 7577
     }
   ]
 }
