@@ -89,6 +89,29 @@ def test_cli_validates_the_silent_stop(capsys):
     assert "--stop-after-messages" in capsys.readouterr().err
 
 
+def test_provider_routing_reaches_openrouter_beside_the_reasoning_request(capsys):
+    from inspect_ai.model import get_model
+
+    model = ["--model", "openrouter/qwen/qwen3.8-27b", "--no-behavior-judge"]
+    routing = {"order": ["deepinfra/bf16"], "allow_fallbacks": False}
+    args = rollout.parse_args(MANIFEST, [*model, "--provider", json.dumps(routing)])
+    assert args.provider == routing and rollout.parse_args(MANIFEST, BASE).provider is None
+    options = rollout.model_options(args.model, True, args.provider)
+    assert options == {"model_args": {"reasoning_enabled": True, "provider": routing}}
+    assert rollout.model_options(args.model, False, args.provider) == {"model_args": {"provider": routing}}
+    assert rollout.model_options(args.model, True, None) == rollout.reasoning_args(args.model)
+    built = get_model(args.model, api_key="sk-or-test-not-a-real-key", **options["model_args"])
+    assert built.api.provider == routing and built.api.reasoning_enabled is True
+    for bad in (
+        ["--model", "anthropic/claude-fable-5.1", "--provider", "{}"],
+        [*model, "--provider", '["deepinfra/bf16"]'],
+        [*model, "--provider", "deepinfra/bf16"],
+    ):
+        with pytest.raises(SystemExit):
+            rollout.parse_args(MANIFEST, [*bad, "--no-behavior-judge"])
+        assert "--provider" in capsys.readouterr().err
+
+
 @scorer(metrics=[])
 def message_count():
     async def score(state: TaskState, target: Target) -> Score:  # noqa: ARG001
