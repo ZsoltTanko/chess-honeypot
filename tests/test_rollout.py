@@ -112,6 +112,26 @@ def test_provider_routing_reaches_openrouter_beside_the_reasoning_request(capsys
         assert "--provider" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("model", ["openrouter/deepseek/deepseek-v4.1-flash", "anthropic/claude-fable-5.1", "openai/gpt-6-luna"])
+@pytest.mark.parametrize("reasoning", [True, False])
+def test_without_provider_the_model_options_are_the_reasoning_request_alone(model, reasoning):
+    assert rollout.model_options(model, reasoning, None) == (rollout.reasoning_args(model) if reasoning else {})
+
+
+def test_without_provider_openrouter_is_sent_the_request_body_of_the_recorded_runs():
+    from inspect_ai.model import GenerateConfig, get_model
+
+    def extra_body(reasoning: bool):
+        name = "openrouter/deepseek/deepseek-v4.1-flash"
+        options = rollout.model_options(name, reasoning, None)
+        model = get_model(name, api_key="sk-or-test-not-a-real-key", **options.get("model_args", {}))
+        return model.api.completion_params(GenerateConfig(), tools=True).get("extra_body")
+
+    # The extra body experiment 006's log records on its DeepSeek calls, with no provider routing.
+    assert extra_body(True) == {"reasoning": {"enabled": True}}
+    assert extra_body(False) is None
+
+
 @scorer(metrics=[])
 def message_count():
     async def score(state: TaskState, target: Target) -> Score:  # noqa: ARG001
