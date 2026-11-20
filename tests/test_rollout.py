@@ -5,6 +5,7 @@ import json
 import re
 from pathlib import Path
 
+import openai
 import pytest
 from inspect_ai import Task, eval as inspect_eval
 from inspect_ai.dataset import Sample
@@ -130,6 +131,127 @@ def test_without_provider_openrouter_is_sent_the_request_body_of_the_recorded_ru
     # The extra body experiment 006's log records on its DeepSeek calls, with no provider routing.
     assert extra_body(True) == {"reasoning": {"enabled": True}}
     assert extra_body(False) is None
+
+
+def test_reasoning_effort_is_sent_with_the_reasoning_request_and_recorded(capsys):
+    from inspect_ai.model import GenerateConfig, get_model
+
+    name = "openrouter/deepseek/deepseek-v4.1-flash"
+    routing = {"order": ["deepinfra/fp8"], "allow_fallbacks": False}
+    args = rollout.parse_args(MANIFEST, ["--model", name, "--no-behavior-judge", "--provider", json.dumps(routing), "--reasoning-effort", "high"])
+    options = rollout.model_options(args.model, True, args.provider, args.reasoning_effort)
+    assert options == {"model_args": {"reasoning_enabled": True, "provider": routing}, "reasoning_effort": "high"}
+    model = get_model(name, api_key="sk-or-test-not-a-real-key", **options["model_args"])
+    body = model.api.completion_params(GenerateConfig(reasoning_effort=options["reasoning_effort"]), tools=True)["extra_body"]
+    assert body == {"reasoning": {"effort": "high", "enabled": True}, "provider": routing}
+    assert rollout.model_options("anthropic/claude-fable-5.1", True, None, "medium") == {"reasoning_effort": "medium"}
+    assert rollout.parse_args(MANIFEST, BASE).reasoning_effort is None  # unset, the request of the recorded runs
+    for bad in (["--reasoning-effort", "high", "--no-reasoning"], ["--reasoning-effort", "none"]):
+        with pytest.raises(SystemExit):
+            rollout.parse_args(MANIFEST, [*BASE, *bad])
+        assert "--reasoning-effort" in capsys.readouterr().err
+
+
+def test_provider_routing_must_pin_one_provider_with_no_fallbacks(capsys):
+    model = ["--model", "openrouter/qwen/qwen3.8-27b", "--no-behavior-judge"]
+    for good in ({"order": ["deepinfra/bf16"], "allow_fallbacks": False}, {"only": ["deepinfra/bf16"], "allow_fallbacks": False}):
+        assert rollout.parse_args(MANIFEST, [*model, "--provider", json.dumps(good)]).provider == good
+    for bad in ({"order": ["deepinfra/bf16"]}, {"order": ["deepinfra/bf16", "novita/fp8"], "allow_fallbacks": False},
+                {"only": ["deepinfra/bf16"], "allow_fallbacks": True}, {"allow_fallbacks": False}):
+        with pytest.raises(SystemExit):
+            rollout.parse_args(MANIFEST, [*model, "--provider", json.dumps(bad)])
+        assert "--provider must pin one provider" in capsys.readouterr().err
+
+
+def test_a_provider_refusal_is_told_apart_from_a_transport_error():
+    import httpx
+    from inspect_ai.model._providers.openrouter import OpenRouterError
+
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    moderation = OpenRouterError({"code": 403, "message": "Your chosen model requires moderation and your input was flagged"})
+    denied = openai.PermissionDeniedError("forbidden", response=httpx.Response(403, request=request), body=None)
+    assert rollout.is_provider_refusal(moderation) and rollout.is_provider_refusal(denied)
+    assert rollout.is_provider_refusal(ExceptionGroup("g", [moderation]))
+    for transport in (openai.APIConnectionError(request=request), openai.APITimeoutError(request=request),
+                      openai.InternalServerError("bad gateway", response=httpx.Response(502, request=request), body=None),
+                      OpenRouterError({"code": 402, "message": "insufficient credits"}), RuntimeError("setup failed")):
+        assert not rollout.is_provider_refusal(transport)
+    assert not rollout.is_provider_refusal(ExceptionGroup("g", [moderation, RuntimeError("x")]))
+
+
+def test_served_counts_the_providers_and_models_the_responses_name():
+    from inspect_ai.model import GenerateConfig, ModelOutput
+    from inspect_ai.model._model_call import ModelCall
+
+    def event(response, role=None, model="deepseek/deepseek-v4.1-flash-20260815"):
+        return rollout.ModelEvent(model="openrouter/deepseek/deepseek-v4.1-flash", role=role, input=[], tools=[], tool_choice="auto",
+                                  config=GenerateConfig(), output=ModelOutput.from_content(model, "e2e4"),
+                                  call=None if response is False else ModelCall(request={}, response=response))
+
+    events = [event({"provider": "DeepInfra"}), event({"provider": "DeepInfra"}), event({"provider": "Novita"}), event({}),
+              event(None), event(False), event({"provider": "OpenAI"}, role="grader", model="openai/gpt-6-luna"), "not an event"]
+    assert rollout.served(events) == {
+        "model_calls": 6, "calls_without_response": 2,
+        "providers": {"DeepInfra": 2, "Novita": 1, "none named": 1},
+        "models": {"deepseek/deepseek-v4.1-flash-20260815": 6},
+    }
+
+
+def run_scripted(outputs, log_dir: Path, retry_on_error: int = 0):
+    """One episode against a mock model that replays *outputs* (a generator may raise), with the budget hook and limits of the real runner."""
+    from inspect_ai.model import get_model
+
+    task = Task(
+        dataset=[Sample(input="Play.", id="v001", metadata={"variant": "v001"})],
+        solver=rollout.bounded_agent(40, 300),
+        scorer=message_count(),
+    )
+    model = get_model("mockllm/model", custom_outputs=outputs)
+    [log] = inspect_eval(task, model=model, display="none", log_dir=str(log_dir), retry_on_error=retry_on_error or None)
+    return log
+
+
+def test_a_content_filter_stop_ends_the_episode_as_a_kept_provider_refusal(tmp_path):
+    from inspect_ai.model import ModelOutput
+
+    outputs = [ModelOutput.from_content("model", "Let me look around."),
+               ModelOutput.from_content("model", "The request was blocked.", stop_reason="content_filter"),
+               ModelOutput.from_content("model", "never reached")]
+    log = run_scripted(outputs, tmp_path)
+    [sample] = log.samples
+    assert log.status == "success" and sample.metadata["ended_by"] == "provider_refusal"
+    assert sample.messages[-1].text == "The request was blocked."
+    assert sample.metadata["served"]["model_calls"] == 2 and "provider_refusal" not in sample.metadata
+
+
+def test_a_refusal_raised_by_the_provider_is_graded_and_not_retried(tmp_path):
+    from inspect_ai.model import ModelOutput
+    from inspect_ai.model._providers.openrouter import OpenRouterError
+
+    calls = []
+
+    def outputs():
+        calls.append(1)
+        yield ModelOutput.from_content("model", "I will start the game.")
+        raise OpenRouterError({"code": 403, "message": "Your chosen model requires moderation and your input was flagged"})
+
+    log = run_scripted(outputs(), tmp_path, retry_on_error=3)
+    [sample] = log.samples
+    assert log.status == "success" and not sample.error_retries and len(calls) == 1
+    assert sample.metadata["ended_by"] == "provider_refusal" and "moderation" in sample.metadata["provider_refusal"]
+    assert [m.role for m in sample.messages][:3] == ["user", "assistant", "user"]
+    assert sample.scores["message_count"].value == len(sample.messages)
+
+
+def test_a_transport_error_stays_an_error_for_the_retry(tmp_path):
+    import httpx
+
+    def outputs():
+        raise openai.APIConnectionError(request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"))
+        yield  # a generator
+
+    log = run_scripted(outputs(), tmp_path)
+    assert log.status == "error"
 
 
 @scorer(metrics=[])
