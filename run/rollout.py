@@ -295,6 +295,15 @@ def _ending(exc: BaseException, silent_stop: bool) -> str:
     return "output_limit"
 
 
+def is_spent_budget(leaf: BaseException) -> bool:
+    """Whether *leaf* is OpenRouter saying a spending limit is used up: a guardrail budget, a workspace
+    budget or the key's own limit. OpenRouter answers that with a 403 too, before the request reaches
+    any provider; its message begins "Budget limit exceeded" and its metadata names a ``limit_source``."""
+    body = leaf.response if isinstance(leaf, OpenRouterError) else getattr(leaf, "body", None)
+    text = f"{json.dumps(body) if isinstance(body, dict) else ''} {leaf}".lower()
+    return "limit_source" in text or "budget limit exceeded" in text
+
+
 def is_provider_refusal(exc: BaseException) -> bool:
     """Whether *exc* (or every leaf of a group) is the serving provider refusing the request.
 
@@ -303,11 +312,13 @@ def is_provider_refusal(exc: BaseException) -> bool:
     returns as output, a ``content_filter`` stop, never raises; ``bounded_agent`` ends the episode on
     it. Everything else that ends a call -- a dropped connection, a timeout, a 5xx, a rate limit that
     outlasted Inspect's own retries -- is a transport error: it stays an error, and ``--retry-on-error``
-    re-runs the episode."""
+    re-runs the episode. So does a 403 that says a spending limit is used up (``is_spent_budget``): no
+    provider refused anything, and kept as refusals the rest of a run's episodes would each end at
+    their next call and never be run again."""
     leaves = _leaves(exc)
     return bool(leaves) and all(
-        isinstance(leaf, openai.PermissionDeniedError)
-        or (isinstance(leaf, OpenRouterError) and leaf.response.get("code") == 403)
+        (isinstance(leaf, openai.PermissionDeniedError) or (isinstance(leaf, OpenRouterError) and leaf.response.get("code") == 403))
+        and not is_spent_budget(leaf)
         for leaf in leaves
     )
 

@@ -179,6 +179,38 @@ def test_a_provider_refusal_is_told_apart_from_a_transport_error():
     assert not rollout.is_provider_refusal(ExceptionGroup("g", [moderation, RuntimeError("x")]))
 
 
+BUDGET = {"code": 403, "message": "Budget limit exceeded (weekly limit). Contact your org admin. $52.00 of $50.00 used; resets 2026-10-12T00:00:00.000Z.",
+          "metadata": {"limit_source": "openrouter_guardrail_budget"}}  # fmt: skip
+
+
+def test_a_spent_budget_is_not_a_provider_refusal():
+    import httpx
+    from inspect_ai.model._providers.openrouter import OpenRouterError
+
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    in_body = OpenRouterError(BUDGET)
+    as_status = openai.PermissionDeniedError(f"Error code: 403 - {BUDGET}", response=httpx.Response(403, request=request), body=BUDGET)
+    key_limit = OpenRouterError({"code": 403, "message": "Budget limit exceeded (key limit). $10.00 of $10.00 used; resets never."})
+    for spent in (in_body, as_status, key_limit, ExceptionGroup("g", [in_body])):
+        assert not rollout.is_provider_refusal(spent)
+    moderation = OpenRouterError({"code": 403, "message": "Your chosen model requires moderation and your input was flagged"})
+    assert not rollout.is_provider_refusal(ExceptionGroup("g", [moderation, in_body]))
+    assert rollout.is_provider_refusal(moderation)  # a refusal stays one
+
+
+def test_a_spent_budget_stays_an_error_so_that_the_run_stops(tmp_path):
+    from inspect_ai.model import ModelOutput
+    from inspect_ai.model._providers.openrouter import OpenRouterError
+
+    def outputs():
+        yield ModelOutput.from_content("model", "I will start the game.")
+        raise OpenRouterError(BUDGET)
+
+    log = run_scripted(outputs(), tmp_path)
+    assert log.status == "error"
+    assert not any((s.metadata or {}).get("ended_by") == "provider_refusal" for s in log.samples or [])
+
+
 def test_served_counts_the_providers_and_models_the_responses_name():
     from inspect_ai.model import GenerateConfig, ModelOutput
     from inspect_ai.model._model_call import ModelCall
